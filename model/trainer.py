@@ -9,11 +9,13 @@ from torch.autograd import Variable
 import numpy as np
 from torchcrf import CRF
 
-from model.gcn import GCNClassifier
-from utils import constant, torch_utils
+from definition_extraction.model.gcn import GCNClassifier
+from definition_extraction.utils import constant, torch_utils
 
 import random
+
 random.seed(1234)
+
 
 class Trainer(object):
     def __init__(self, opt, emb_matrix=None):
@@ -34,14 +36,14 @@ class Trainer(object):
         except BaseException:
             print("Cannot load model from {}".format(filename))
             exit()
-        self.model.load_state_dict(checkpoint['model'])
-        self.opt = checkpoint['config']
+        self.model.load_state_dict(checkpoint["model"])
+        self.opt = checkpoint["config"]
 
     def save(self, filename, epoch):
         params = {
-                'model': self.model.state_dict(),
-                'config': self.opt,
-                }
+            "model": self.model.state_dict(),
+            "config": self.opt,
+        }
         try:
             torch.save(params, filename)
             print("model saved to {}".format(filename))
@@ -63,6 +65,7 @@ def unpack_batch(batch, cuda):
     lens = batch[1].eq(0).long().sum(1).squeeze()
     return inputs, labels, sent_labels, dep_path, tokens, head, lens
 
+
 class GCNTrainer(Trainer):
     def __init__(self, opt, emb_matrix=None):
         self.opt = opt
@@ -70,58 +73,73 @@ class GCNTrainer(Trainer):
         self.model = GCNClassifier(opt, emb_matrix=emb_matrix)
         self.criterion = nn.CrossEntropyLoss(reduction="none")
         self.parameters = [p for p in self.model.parameters() if p.requires_grad]
-        self.crf = CRF(self.opt['num_class'], batch_first=True)
+        self.crf = CRF(self.opt["num_class"], batch_first=True)
         self.bc = nn.BCELoss()
-        if opt['cuda']:
+        if opt["cuda"]:
             self.model.cuda()
             self.criterion.cuda()
             self.crf.cuda()
             self.bc.cuda()
-        self.optimizer = torch_utils.get_optimizer(opt['optim'], self.parameters, opt['lr'])
-
+        self.optimizer = torch_utils.get_optimizer(
+            opt["optim"], self.parameters, opt["lr"]
+        )
 
     def update(self, batch):
-        inputs, labels, sent_labels, dep_path, tokens, head, lens = unpack_batch(batch, self.opt['cuda'])
+        inputs, labels, sent_labels, dep_path, tokens, head, lens = unpack_batch(
+            batch, self.opt["cuda"]
+        )
 
         _, _, _, _, terms, _, _ = inputs
 
         # step forward
         self.model.train()
         self.optimizer.zero_grad()
-        logits, class_logits, selections, term_def, not_term_def, term_selections = self.model(inputs)
+        (
+            logits,
+            class_logits,
+            selections,
+            term_def,
+            not_term_def,
+            term_selections,
+        ) = self.model(inputs)
 
         labels = labels - 1
         labels[labels < 0] = 0
         mask = inputs[1].float()
-        mask[mask == 0.] = -1.
-        mask[mask == 1.] = 0.
-        mask[mask == -1.] = 1.
+        mask[mask == 0.0] = -1.0
+        mask[mask == 1.0] = 0.0
+        mask[mask == -1.0] = 1.0
         mask = mask.byte()
         loss = -self.crf(logits, labels, mask=mask)
 
         sent_loss = self.bc(class_logits, sent_labels)
-        loss += self.opt['sent_loss'] * sent_loss
+        loss += self.opt["sent_loss"] * sent_loss
 
         selection_loss = self.bc(selections.view(-1, 1), dep_path.view(-1, 1))
-        loss += self.opt['dep_path_loss'] * selection_loss
+        loss += self.opt["dep_path_loss"] * selection_loss
 
-        term_def_loss = -self.opt['consistency_loss'] * (term_def-not_term_def)
+        term_def_loss = -self.opt["consistency_loss"] * (term_def - not_term_def)
         loss += term_def_loss
-        #loss += self.opt['consistency_loss'] * not_term_def
+        # loss += self.opt['consistency_loss'] * not_term_def
 
-        term_loss = self.opt['sent_loss'] * self.bc(term_selections.view(-1, 1), terms.float().view(-1, 1))
+        term_loss = self.opt["sent_loss"] * self.bc(
+            term_selections.view(-1, 1), terms.float().view(-1, 1)
+        )
         loss += term_loss
-
 
         loss_val = loss.item()
         # backward
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.opt['max_grad_norm'])
+        torch.nn.utils.clip_grad_norm_(
+            self.model.parameters(), self.opt["max_grad_norm"]
+        )
         self.optimizer.step()
         return loss_val, sent_loss.item(), term_loss.item()
 
     def predict(self, batch, unsort=True):
-        inputs, labels, sent_labels, dep_path, tokens, head, lens = unpack_batch(batch, self.opt['cuda'])
+        inputs, labels, sent_labels, dep_path, tokens, head, lens = unpack_batch(
+            batch, self.opt["cuda"]
+        )
 
         orig_idx = batch[-1]
         # forward
@@ -131,9 +149,9 @@ class GCNTrainer(Trainer):
         labels = labels - 1
         labels[labels < 0] = 0
         mask = inputs[1].float()
-        mask[mask == 0.] = -1.
-        mask[mask == 1.] = 0.
-        mask[mask == -1.] = 1.
+        mask[mask == 0.0] = -1.0
+        mask[mask == 1.0] = 0.0
+        mask[mask == -1.0] = 1.0
         mask = mask.byte()
         loss = -self.crf(logits, labels, mask=mask)
 
@@ -146,8 +164,15 @@ class GCNTrainer(Trainer):
         probs = F.softmax(logits, dim=1)
         predictions = self.crf.decode(logits, mask=mask)
 
+        if len(sent_logits.size()) == 0:
+            sent_logits = sent_logits.unsqueeze(0)
         sent_predictions = sent_logits.round().long().data.cpu().numpy()
 
         if unsort:
-            _, predictions, probs, sent_predictions = [list(t) for t in zip(*sorted(zip(orig_idx, predictions, probs, sent_predictions)))]
+            _, predictions, probs, sent_predictions = [
+                list(t)
+                for t in zip(
+                    *sorted(zip(orig_idx, predictions, probs, sent_predictions))
+                )
+            ]
         return predictions, probs, loss.item(), sent_predictions
